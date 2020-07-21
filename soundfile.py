@@ -167,6 +167,33 @@ if __libsndfile_version__.startswith('libsndfile-'):
     __libsndfile_version__ = __libsndfile_version__[len('libsndfile-'):]
 
 
+class SoundFileError(RuntimeError):
+    """Base class for all SoundFile-specific errors.
+
+    :ivar code: libsndfile internal error number or `None`
+    :ivar error_string: raw libsndfile error message or `None`
+    """
+    def __init__(self, message, code=None, error_string=None):
+        self.args = (message, code, error_string)
+        self.message = message
+        self.code = code
+        self.error_string = error_string
+    def __str__(self):
+        return self.message
+
+
+def _sndfile_error(code, message=None, prefix=""):
+    """Return one of the SoundFileError exception, proper for the given
+    sndfile error code.
+
+    Use provided message or auto-generate one with sf_strerror().
+    """
+    err_str = _snd.sf_error_number(code)
+    if message is None:
+        message = prefix + _ffi.string(err_str).decode('utf-8', 'replace')
+    return SoundFileError(message, code, err_str)
+
+
 def read(file, frames=-1, start=0, stop=None, dtype='float64', always_2d=False,
          fill_value=None, out=None, samplerate=None, channels=None,
          format=None, subtype=None, endian=None, closefd=True):
@@ -699,7 +726,8 @@ class SoundFile(object):
             self._check_if_closed()
             err = _snd.sf_set_string(self._file, _str_types[name],
                                      value.encode())
-            _error_check(err)
+            if err != 0:
+                raise _sndfile_error(err)
         else:
             object.__setattr__(self, name, value)
 
@@ -770,7 +798,9 @@ class SoundFile(object):
         """
         self._check_if_closed()
         position = _snd.sf_seek(self._file, frames, whence)
-        _error_check(self._errorcode)
+        err = self._errorcode
+        if err != 0:
+            raise _sndfile_error(err)
         return position
 
     def tell(self):
@@ -1073,7 +1103,7 @@ class SoundFile(object):
         import numpy as np
 
         if 'r' not in self.mode and '+' not in self.mode:
-            raise RuntimeError("blocks() is not allowed in write-only mode")
+            raise SoundFileError("blocks() is not allowed in write-only mode")
 
         if out is None:
             if blocksize is None:
@@ -1131,7 +1161,8 @@ class SoundFile(object):
                               _ffi.new("sf_count_t*", frames),
                               _ffi.sizeof("sf_count_t"))
         if err:
-            raise RuntimeError("Error truncating the file")
+            err = _snd.sf_error(self._file)
+            raise _sndfile_error(err, "Error truncating the file")
         self._info.frames = frames
 
     def flush(self):
@@ -1155,7 +1186,8 @@ class SoundFile(object):
             self.flush()
             err = _snd.sf_close(self._file)
             self._file = None
-            _error_check(err)
+            if err != 0:
+                raise _sndfile_error(err)
 
     def _open(self, file, mode_int, closefd):
         """Call the appropriate sf_open*() function from libsndfile."""
@@ -1180,8 +1212,10 @@ class SoundFile(object):
                                             mode_int, self._info, _ffi.NULL)
         else:
             raise TypeError("Invalid file: {0!r}".format(self.name))
-        _error_check(_snd.sf_error(file_ptr),
-                     "Error opening {0!r}: ".format(self.name))
+        err = _snd.sf_error(file_ptr)
+        if err != 0:
+            raise _sndfile_error(err, prefix="Error opening {0!r}: ".format(
+                                  self.name))
         if mode_int == _snd.SFM_WRITE:
             # Due to a bug in libsndfile version <= 1.0.25, frames != 0
             # when opening a named pipe in SFM_WRITE mode.
@@ -1257,7 +1291,7 @@ class SoundFile(object):
 
         """
         if self.closed:
-            raise RuntimeError("I/O operation on closed file")
+            raise SoundFileError("I/O operation on closed file")
 
     def _check_frames(self, frames, fill_value):
         """Reduce frames to no more than are available in the file."""
@@ -1319,7 +1353,9 @@ class SoundFile(object):
             curr = self.tell()
         func = getattr(_snd, 'sf_' + action + 'f_' + ctype)
         frames = func(self._file, data, frames)
-        _error_check(self._errorcode)
+        err = self._errorcode
+        if err != 0:
+            raise _sndfile_error(err)
         if self.seekable():
             self.seek(curr + frames, SEEK_SET)  # Update read & write position
         return frames
@@ -1348,13 +1384,6 @@ class SoundFile(object):
         if self.seekable():
             self.seek(start, SEEK_SET)
         return frames
-
-
-def _error_check(err, prefix=""):
-    """Pretty-print a numerical error code if there is an error."""
-    if err != 0:
-        err_str = _snd.sf_error_number(err)
-        raise RuntimeError(prefix + _ffi.string(err_str).decode('utf-8', 'replace'))
 
 
 def _format_int(format, subtype, endian):
